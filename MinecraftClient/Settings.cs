@@ -59,21 +59,21 @@ namespace MinecraftClient
         {
             get
             {
-                return (byte) (
-                      ((MCSettings_Skin_Cape         ? 1 : 0) << 0)
-                    | ((MCSettings_Skin_Jacket       ? 1 : 0) << 1)
-                    | ((MCSettings_Skin_Sleeve_Left  ? 1 : 0) << 2)
+                return (byte)(
+                      ((MCSettings_Skin_Cape ? 1 : 0) << 0)
+                    | ((MCSettings_Skin_Jacket ? 1 : 0) << 1)
+                    | ((MCSettings_Skin_Sleeve_Left ? 1 : 0) << 2)
                     | ((MCSettings_Skin_Sleeve_Right ? 1 : 0) << 3)
-                    | ((MCSettings_Skin_Pants_Left   ? 1 : 0) << 4)
-                    | ((MCSettings_Skin_Pants_Right  ? 1 : 0) << 5)
-                    | ((MCSettings_Skin_Hat          ? 1 : 0) << 6)
+                    | ((MCSettings_Skin_Pants_Left ? 1 : 0) << 4)
+                    | ((MCSettings_Skin_Pants_Right ? 1 : 0) << 5)
+                    | ((MCSettings_Skin_Hat ? 1 : 0) << 6)
                 );
             }
         }
 
         //Other Settings
         public static string TranslationsFile_FromMCDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + @"\.minecraft\assets\objects\ed\eda1518b15c711cf6e75d99003bd87753f67fac4"; //MC 1.10 en_GB.lang
-        public static string TranslationsFile_Website_Index = "https://s3.amazonaws.com/Minecraft.Download/indexes/1.10.json";
+        public static string TranslationsFile_Website_Index = "https://s3.amazonaws.com/Minecraft.Download/indexes/1.13.json";
         public static string TranslationsFile_Website_Download = "http://resources.download.minecraft.net";
         public static TimeSpan splitMessageDelay = TimeSpan.FromSeconds(2);
         public static List<string> Bots_Owners = new List<string>();
@@ -89,6 +89,7 @@ namespace MinecraftClient
         public static bool DisplayXPBarMessages = true;
         public static bool DisplayChatLinks = true;
         public static bool TerrainAndMovements = false;
+        public static bool InventoryHandling = false;
         public static string PrivateMsgsCmdName = "tell";
         public static CacheType SessionCaching = CacheType.Disk;
         public static bool DebugMessages = false;
@@ -161,6 +162,7 @@ namespace MinecraftClient
         /// <param name="settingsfile">File to load</param>
         public static void LoadSettings(string settingsfile)
         {
+            ConsoleIO.WriteLogLine(String.Format("[Settings] Loading Settings from {0}", System.IO.Path.GetFullPath(settingsfile)));
             if (File.Exists(settingsfile))
             {
                 try
@@ -209,7 +211,7 @@ namespace MinecraftClient
                                             {
                                                 case "login": Login = argValue; break;
                                                 case "password": Password = argValue; break;
-                                                case "serverip": if(!SetServerIP(argValue)) serverAlias = argValue; ; break;
+                                                case "serverip": if (!SetServerIP(argValue)) serverAlias = argValue; ; break;
                                                 case "singlecommand": SingleCommand = argValue; break;
                                                 case "language": Language = argValue; break;
                                                 case "consoletitle": ConsoleTitle = argValue; break;
@@ -224,6 +226,7 @@ namespace MinecraftClient
                                                 case "showxpbarmessages": DisplayXPBarMessages = str2bool(argValue); break;
                                                 case "showchatlinks": DisplayChatLinks = str2bool(argValue); break;
                                                 case "terrainandmovements": TerrainAndMovements = str2bool(argValue); break;
+                                                case "inventoryhandling": InventoryHandling = str2bool(argValue); break;
                                                 case "privatemsgscmdname": PrivateMsgsCmdName = argValue.ToLower().Trim(); break;
                                                 case "botmessagedelay": botMessageDelay = TimeSpan.FromSeconds(str2int(argValue)); break;
                                                 case "debugmessages": DebugMessages = str2bool(argValue); break;
@@ -459,13 +462,20 @@ namespace MinecraftClient
                                                     }
                                                     break;
                                                 case "renderdistance":
-                                                    MCSettings_RenderDistance = (byte)str2int(argValue);
-                                                    switch (argValue.ToLower())
+                                                    MCSettings_RenderDistance = 2;
+                                                    if (argValue.All(Char.IsDigit))
                                                     {
-                                                        case "tiny": MCSettings_RenderDistance = 2; break;
-                                                        case "short": MCSettings_RenderDistance = 4; break;
-                                                        case "medium": MCSettings_RenderDistance = 8; break;
-                                                        case "far": MCSettings_RenderDistance = 16; break;
+                                                        MCSettings_RenderDistance = (byte)str2int(argValue);
+                                                    }
+                                                    else
+                                                    {
+                                                        switch (argValue.ToLower())
+                                                        {
+                                                            case "tiny": MCSettings_RenderDistance = 2; break;
+                                                            case "short": MCSettings_RenderDistance = 4; break;
+                                                            case "medium": MCSettings_RenderDistance = 8; break;
+                                                            case "far": MCSettings_RenderDistance = 16; break;
+                                                        }
                                                     }
                                                     break;
                                                 case "chatmode":
@@ -538,6 +548,7 @@ namespace MinecraftClient
                 + "showxpbarmessages=true             # Messages displayed above xp bar\r\n"
                 + "showchatlinks=true                 # Show links embedded in chat messages\r\n"
                 + "terrainandmovements=false          # Uses more ram, cpu, bandwidth\r\n"
+                + "inventoryhandling=false            # Toggle inventory handling\r\n"
                 + "sessioncache=disk                  # How to retain session tokens. Use 'none', 'memory' or 'disk'\r\n"
                 + "resolvesrvrecords=fast             # Use 'false', 'fast' (5s timeout), or 'true'. Required for joining some servers.\r\n"
                 + "accountlist=accounts.txt           # See README > 'Servers and Accounts file' for more info about this file\r\n"
@@ -637,9 +648,12 @@ namespace MinecraftClient
         {
             try
             {
-                return Convert.ToInt32(str);
+                return Convert.ToInt32(str.Trim());
             }
-            catch { return 0; }
+            catch {
+                ConsoleIO.WriteLogLine("Failed to convert '" + str + "' into an int. Please check your settings.");
+                return 0;
+            }
         }
 
         /// <summary>

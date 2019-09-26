@@ -35,10 +35,10 @@ namespace MinecraftClient.Protocol.Handlers
             this.protocolversion = ProtocolVersion;
             this.handler = Handler;
 
-            if (Settings.TerrainAndMovements)
+            if (Handler.GetTerrainEnabled())
             {
                 ConsoleIO.WriteLineFormatted("§8Terrain & Movements currently not handled for that MC version.");
-                Settings.TerrainAndMovements = false;
+                Handler.SetTerrainEnabled(false);
             }
         }
 
@@ -83,6 +83,7 @@ namespace MinecraftClient.Protocol.Handlers
             {
                 case 0x00: byte[] keepalive = new byte[5] { 0, 0, 0, 0, 0 };
                     Receive(keepalive, 1, 4, SocketFlags.None);
+                    handler.OnServerKeepAlive();
                     Send(keepalive); break;
                 case 0x01: readData(4); readNextString(); readData(5); break;
                 case 0x02: readData(1); readNextString(); readNextString(); readData(4); break;
@@ -635,7 +636,7 @@ namespace MinecraftClient.Protocol.Handlers
             return false; //Currently not implemented
         }
 
-        public bool SendLocationUpdate(Location location, bool onGround, byte[] yawpitch)
+        public bool SendLocationUpdate(Location location, bool onGround, float? yaw, float? pitch)
         {
             return false; //Currently not implemented
         }

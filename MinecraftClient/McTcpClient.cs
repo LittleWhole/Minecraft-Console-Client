@@ -16,7 +16,6 @@ namespace MinecraftClient
     /// <summary>
     /// The main client class, used to connect to a Minecraft server.
     /// </summary>
-
     public class McTcpClient : IMinecraftComHandler
     {
         public static int ReconnectionAttemptsLeft = 0;
@@ -27,9 +26,15 @@ namespace MinecraftClient
 
         private readonly List<ChatBot> bots = new List<ChatBot>();
         private static readonly List<ChatBot> botsOnHold = new List<ChatBot>();
+        private static List<Inventory> inventories = new List<Inventory>();
 
         private readonly Dictionary<string, List<ChatBot>> registeredBotPluginChannels = new Dictionary<string, List<ChatBot>>();
         private readonly List<string> registeredServerPluginChannels = new List<String>();
+
+        private bool terrainAndMovementsEnabled;
+        private bool terrainAndMovementsRequested = false;
+        private bool inventoryHandlingEnabled;
+        private bool inventoryHandlingRequested = false;
 
         private object locationLock = new object();
         private bool locationReceived = false;
@@ -37,7 +42,8 @@ namespace MinecraftClient
         private Queue<Location> steps;
         private Queue<Location> path;
         private Location location;
-        private byte[] yawpitch;
+        private float? yaw;
+        private float? pitch;
         private double motionY;
 
         private string host;
@@ -45,6 +51,9 @@ namespace MinecraftClient
         private string username;
         private string uuid;
         private string sessionid;
+        private Inventory playerInventory;
+        private DateTime lastKeepAlive;
+        private object lastKeepAliveLock = new object();
 
         public int GetServerPort() { return port; }
         public string GetServerHost() { return host; }
@@ -57,6 +66,7 @@ namespace MinecraftClient
         TcpClient client;
         IMinecraftCom handler;
         Thread cmdprompt;
+        Thread timeoutdetector;
 
         /// <summary>
         /// Starts the main chat client
@@ -100,6 +110,9 @@ namespace MinecraftClient
         /// <param name="command">The text or command to send. Will only be sent if singlecommand is set to true.</param>
         private void StartClient(string user, string uuid, string sessionID, string server_ip, ushort port, int protocolversion, ForgeInfo forgeInfo, bool singlecommand, string command)
         {
+            terrainAndMovementsEnabled = Settings.TerrainAndMovements;
+            inventoryHandlingEnabled = Settings.InventoryHandling;
+
             bool retry = false;
             this.sessionid = sessionID;
             this.uuid = uuid;
@@ -157,6 +170,10 @@ namespace MinecraftClient
                             cmdprompt = new Thread(new ThreadStart(CommandPrompt));
                             cmdprompt.Name = "MCC Command prompt";
                             cmdprompt.Start();
+
+                            timeoutdetector = new Thread(new ThreadStart(TimeoutDetector));
+                            timeoutdetector.Name = "MCC Connection timeout detector";
+                            timeoutdetector.Start();
                         }
                     }
                 }
@@ -179,7 +196,9 @@ namespace MinecraftClient
                 if (ReconnectionAttemptsLeft > 0)
                 {
                     ConsoleIO.WriteLogLine("Waiting 5 seconds (" + ReconnectionAttemptsLeft + " attempts left)...");
-                    Thread.Sleep(5000); ReconnectionAttemptsLeft--; Program.Restart();
+                    Thread.Sleep(5000);
+                    ReconnectionAttemptsLeft--;
+                    Program.Restart();
                 }
                 else if (!singlecommand && Settings.interactiveMode)
                 {
@@ -239,6 +258,29 @@ namespace MinecraftClient
             }
             catch (IOException) { }
             catch (NullReferenceException) { }
+        }
+
+        /// <summary>
+        /// Periodically checks for server keepalives and consider that connection has been lost if the last received keepalive is too old.
+        /// </summary>
+        private void TimeoutDetector()
+        {
+            lock (lastKeepAliveLock)
+            {
+                lastKeepAlive = DateTime.Now;
+            }
+            do
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(15));
+                lock (lastKeepAliveLock)
+                {
+                    if (lastKeepAlive.AddSeconds(30) < DateTime.Now)
+                    {
+                        OnConnectionLost(ChatBot.DisconnectReason.ConnectionLost, "Connection Timeout");
+                    }
+                }
+            }
+            while (true);
         }
 
         /// <summary>
@@ -312,6 +354,9 @@ namespace MinecraftClient
         /// </summary>
         public void Disconnect()
         {
+            foreach (ChatBot bot in bots)
+                bot.OnDisconnect(ChatBot.DisconnectReason.ConnectionLost, "Disconnected");
+
             botsOnHold.Clear();
             botsOnHold.AddRange(bots);
 
@@ -323,6 +368,9 @@ namespace MinecraftClient
 
             if (cmdprompt != null)
                 cmdprompt.Abort();
+
+            if (timeoutdetector != null)
+                timeoutdetector.Abort();
 
             Thread.Sleep(1000);
 
@@ -385,6 +433,98 @@ namespace MinecraftClient
                     Settings.MCSettings_MainHand);
             foreach (ChatBot bot in bots)
                 bot.AfterGameJoined();
+            if (inventoryHandlingRequested)
+            {
+                inventoryHandlingRequested = false;
+                inventoryHandlingEnabled = true;
+                ConsoleIO.WriteLogLine("Inventory handling is now enabled.");
+            }
+        }
+
+        /// <summary>
+        /// Called when the player respawns, which happens on login, respawn and world change.
+        /// </summary>
+        public void OnRespawn()
+        {
+            if (terrainAndMovementsRequested)
+            {
+                terrainAndMovementsEnabled = true;
+                terrainAndMovementsRequested = false;
+                ConsoleIO.WriteLogLine("Terrain and Movements is now enabled.");
+            }
+
+            if (terrainAndMovementsEnabled)
+            {
+                world.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Get Terrain and Movements status.
+        /// </summary>
+        public bool GetTerrainEnabled()
+        {
+            return terrainAndMovementsEnabled;
+        }
+
+        /// <summary>
+        /// Get Inventory Handling Mode
+        /// </summary>
+        public bool GetInventoryEnabled()
+        {
+            return inventoryHandlingEnabled;
+        }
+
+        /// <summary>
+        /// Enable or disable Terrain and Movements.
+        /// Please note that Enabling will be deferred until next relog, respawn or world change.
+        /// </summary>
+        /// <param name="enabled">Enabled</param>
+        /// <returns>TRUE if the setting was applied immediately, FALSE if delayed.</returns>
+        public bool SetTerrainEnabled(bool enabled)
+        {
+            if (enabled)
+            {
+                if (!terrainAndMovementsEnabled)
+                {
+                    terrainAndMovementsRequested = true;
+                    return false;
+                }
+            }
+            else
+            {
+                terrainAndMovementsEnabled = false;
+                terrainAndMovementsRequested = false;
+                locationReceived = false;
+                world.Clear();
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Enable or disable Inventories.
+        /// Please note that Enabling will be deferred until next relog.
+        /// </summary>
+        /// <param name="enabled">Enabled</param>
+        /// <returns>TRUE if the setting was applied immediately, FALSE if delayed.</returns>
+        public bool SetInventoryEnabled(bool enabled)
+        {
+            if (enabled)
+            {
+                if (!inventoryHandlingEnabled)
+                {
+                    inventoryHandlingRequested = true;
+                    return false;
+                }
+            }
+            else
+            {
+                inventoryHandlingEnabled = false;
+                inventoryHandlingRequested = false;
+                inventories.Clear();
+                playerInventory = null;
+            }
+            return true;
         }
 
         /// <summary>
@@ -411,11 +551,71 @@ namespace MinecraftClient
         /// or if a ChatBot whishes to update the player's location.
         /// </summary>
         /// <param name="location">The new location</param>
-        /// <param name="relative">If true, the location is relative to the current location</param>
-        public void UpdateLocation(Location location, byte[] yawpitch)
+        /// <param name="yaw">Yaw to look at</param>
+        /// <param name="pitch">Pitch to look at</param>
+        public void UpdateLocation(Location location, float yaw, float pitch)
         {
-            this.yawpitch = yawpitch;
+            this.yaw = yaw;
+            this.pitch = pitch;
             UpdateLocation(location, false);
+        }
+
+        /// <summary>
+        /// Called when the server sends a new player location,
+        /// or if a ChatBot whishes to update the player's location.
+        /// </summary>
+        /// <param name="location">The new location</param>
+        /// <param name="lookAt">Block coordinates to look at</param>
+        public void UpdateLocation(Location location, Location lookAtLocation)
+        {
+            double dx = lookAtLocation.X - (location.X - 0.5);
+            double dy = lookAtLocation.Y - (location.Y + 1);
+            double dz = lookAtLocation.Z - (location.Z - 0.5);
+
+            double r = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+
+            float yaw = Convert.ToSingle(-Math.Atan2(dx, dz) / Math.PI * 180);
+            float pitch = Convert.ToSingle(-Math.Asin(dy / r) / Math.PI * 180);
+            if (yaw < 0) yaw += 360;
+
+            UpdateLocation(location, yaw, pitch);
+        }
+
+        /// <summary>
+        /// Called when the server sends a new player location,
+        /// or if a ChatBot whishes to update the player's location.
+        /// </summary>
+        /// <param name="location">The new location</param>
+        /// <param name="direction">Direction to look at</param>
+        public void UpdateLocation(Location location, Direction direction)
+        {
+            float yaw = 0;
+            float pitch = 0;
+
+            switch (direction)
+            {
+                case Direction.Up:
+                    pitch = -90;
+                    break;
+                case Direction.Down:
+                    pitch = 90;
+                    break;
+                case Direction.East:
+                    yaw = 270;
+                    break;
+                case Direction.West:
+                    yaw = 90;
+                    break;
+                case Direction.North:
+                    yaw = 180;
+                    break;
+                case Direction.South:
+                    break;
+                default:
+                    throw new ArgumentException("Unknown direction", "direction");
+            }
+
+            UpdateLocation(location, yaw, pitch);
         }
 
         /// <summary>
@@ -443,6 +643,10 @@ namespace MinecraftClient
         /// <param name="links">Links embedded in text</param>
         public void OnTextReceived(string text, bool isJson)
         {
+            lock (lastKeepAliveLock)
+            {
+                lastKeepAlive = DateTime.Now;
+            }
             List<string> links = new List<string>();
             string json = null;
             if (isJson)
@@ -474,10 +678,54 @@ namespace MinecraftClient
         }
 
         /// <summary>
+        /// Received a connection keep-alive from the server
+        /// </summary>
+        public void OnServerKeepAlive()
+        {
+            lock (lastKeepAliveLock)
+            {
+                lastKeepAlive = DateTime.Now;
+            }
+        }
+
+        /// <summary>
+        /// When an inventory is opened
+        /// </summary>
+        /// <param name="inventory">Location to reach</param>
+        public void OnInventoryOpen(Inventory inventory)
+        {
+            //TODO: Handle Inventory
+            if (!inventories.Contains(inventory))
+            {
+                inventories.Add(inventory);
+            }
+        }
+
+        /// <summary>
+        /// When an inventory is close
+        /// </summary>
+        /// <param name="inventoryID">Location to reach</param>
+        public void OnInventoryClose(byte inventoryID)
+        {
+            for (int i = 0; i < inventories.Count; i++)
+            {
+                Inventory inventory = inventories[i];
+                if (inventory == null) continue;
+                if (inventory.id == inventoryID)
+                {
+                    inventories.Remove(inventory);
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
         /// When connection has been lost
         /// </summary>
         public void OnConnectionLost(ChatBot.DisconnectReason reason, string message)
         {
+            world.Clear();
+
             bool will_restart = false;
 
             switch (reason)
@@ -527,23 +775,35 @@ namespace MinecraftClient
                 }
             }
 
-            if (Settings.TerrainAndMovements && locationReceived)
+            if (terrainAndMovementsEnabled && locationReceived)
             {
                 lock (locationLock)
                 {
                     for (int i = 0; i < 2; i++) //Needs to run at 20 tps; MCC runs at 10 tps
                     {
-                        if (yawpitch == null)
+                        if (yaw == null || pitch == null)
                         {
                             if (steps != null && steps.Count > 0)
+                            {
                                 location = steps.Dequeue();
+                            }
                             else if (path != null && path.Count > 0)
-                                steps = Movement.Move2Steps(location, path.Dequeue(), ref motionY);
-                            else location = Movement.HandleGravity(world, location, ref motionY);
+                            {
+                                Location next = path.Dequeue();
+                                steps = Movement.Move2Steps(location, next, ref motionY);
+                                UpdateLocation(location, next + new Location(0, 1, 0)); // Update yaw and pitch to look at next step
+                            }
+                            else
+                            {
+                                location = Movement.HandleGravity(world, location, ref motionY);
+                            }
                         }
-                        handler.SendLocationUpdate(location, Movement.IsOnGround(world, location), yawpitch);
+                        handler.SendLocationUpdate(location, Movement.IsOnGround(world, location), yaw, pitch);
                     }
-                    yawpitch = null; //First 2 updates must be player position AND look, and player must not move (to conform with vanilla)
+                    // First 2 updates must be player position AND look, and player must not move (to conform with vanilla)
+                    // Once yaw and pitch have been sent, switch back to location-only updates (without yaw and pitch)
+                    yaw = null;
+                    pitch = null;
                 }
             }
         }
@@ -628,6 +888,26 @@ namespace MinecraftClient
             {
                 return onlinePlayers.Values.Distinct().ToArray();
             }
+        }
+
+        /// <summary>
+        /// Get a dictionary of online player names and their corresponding UUID
+        /// </summary>
+        /// <returns>
+        ///     dictionary of online player whereby
+        ///     UUID represents the key
+        ///     playername represents the value</returns>
+        public Dictionary<string, string> GetOnlinePlayersWithUUID()
+        {
+            Dictionary<string, string> uuid2Player = new Dictionary<string, string>();
+            lock (onlinePlayers)
+            {
+                foreach (Guid key in onlinePlayers.Keys)
+                {
+                    uuid2Player.Add(key.ToString(), onlinePlayers[key]);
+                }
+            }
+            return uuid2Player;
         }
 
         /// <summary>
